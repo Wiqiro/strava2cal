@@ -3,16 +3,16 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 )
 
 var (
 	CLIENT_ID     = os.Getenv("CLIENT_ID")
 	CLIENT_SECRET = os.Getenv("CLIENT_SECRET")
 	APP_ADDRESS   = os.Getenv("APP_ADDRESS")
-	CALENDAR_FILE = os.Getenv("CALENDAR_FILE")
 	STATE_FILE    = os.Getenv("STATE_FILE")
 )
 
@@ -25,26 +25,7 @@ type WebhookData struct {
 	SubscriptionId int    `json:"subscription_id"`
 }
 
-func addEvent(f *os.File, activity *Activity) error {
-	_, err := f.Seek(-int64(len("END:VCALENDAR\n")), io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	event := fmt.Sprintf("BEGIN:VEVENT\nSUMMARY:%s\nDTSTART:%s\nDTEND:%s\nEND:VEVENT\nEND:VCALENDAR\n",
-		activity.Name,
-		activity.StartDate,
-		activity.StartDate,
-	)
-
-	_, err = f.WriteString(event)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func registerWebhook(clientId, clientSecret, callbackUrl, verifyToken string) error {
+func registerWebhook(callbackUrl, verifyToken string) error {
 	webhookUrl := "https://www.strava.com/api/v3/push_subscriptions"
 
 	req, err := http.NewRequest("POST", webhookUrl, nil)
@@ -53,8 +34,8 @@ func registerWebhook(clientId, clientSecret, callbackUrl, verifyToken string) er
 	}
 
 	q := req.URL.Query()
-	q.Add("client_id", clientId)
-	q.Add("client_secret", clientSecret)
+	q.Add("client_id", CLIENT_ID)
+	q.Add("client_secret", CLIENT_SECRET)
 	q.Add("callback_url", callbackUrl)
 	q.Add("verify_token", verifyToken)
 	req.URL.RawQuery = q.Encode()
@@ -74,7 +55,10 @@ func registerWebhook(clientId, clientSecret, callbackUrl, verifyToken string) er
 		return err
 	}
 
-	SaveSubscriptionID(content.Id)
+	err = saveSubscriptionID(content.Id)
+	if err != nil {
+		return err
+	}
 
 	if resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("failed to register webhook, status code: %d", resp.StatusCode)
@@ -82,7 +66,7 @@ func registerWebhook(clientId, clientSecret, callbackUrl, verifyToken string) er
 	return nil
 }
 
-func unregisterWebhook(clientId, clientSecret string, subscriptionId int) error {
+func unregisterWebhook(subscriptionId int) error {
 	webhookUrl := fmt.Sprintf("https://www.strava.com/api/v3/push_subscriptions/%d", subscriptionId)
 
 	req, err := http.NewRequest("DELETE", webhookUrl, nil)
@@ -91,8 +75,8 @@ func unregisterWebhook(clientId, clientSecret string, subscriptionId int) error 
 	}
 
 	q := req.URL.Query()
-	q.Add("client_id", clientId)
-	q.Add("client_secret", clientSecret)
+	q.Add("client_id", CLIENT_ID)
+	q.Add("client_secret", CLIENT_SECRET)
 	req.URL.RawQuery = q.Encode()
 
 	resp, err := http.DefaultClient.Do(req)
@@ -118,16 +102,9 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handlePost(w http.ResponseWriter, r *http.Request, icsFile string) {
-	file, err := os.OpenFile(icsFile, os.O_RDWR, 0644)
-	if err != nil {
-		http.Error(w, "Failed to open calendar file", http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-
+func handlePost(w http.ResponseWriter, r *http.Request) {
 	var webhookData WebhookData
-	err = json.NewDecoder(r.Body).Decode(&webhookData)
+	err := json.NewDecoder(r.Body).Decode(&webhookData)
 	if err != nil {
 		http.Error(w, "Failed to parse webhook data", http.StatusBadRequest)
 		return
@@ -137,37 +114,33 @@ func handlePost(w http.ResponseWriter, r *http.Request, icsFile string) {
 		return
 	}
 
-	token, err := LoadToken()
+	state, err := loadState()
 	if err != nil {
-		http.Error(w, "Failed to load token", http.StatusInternalServerError)
+		http.Error(w, "Failed to load state", http.StatusInternalServerError)
 		return
 	}
+	token := state.Token
 	activity, err := FetchActivity(token.AccessToken, webhookData.ObjectId)
 	if err != nil {
 		fmt.Println("Error fetching activity:", err)
 		http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
 		return
 	}
-
-	err = addEvent(file, activity)
+	state.Activities = append(state.Activities, *activity)
+	err = saveState(state)
 	if err != nil {
-		http.Error(w, "Failed to add event", http.StatusInternalServerError)
+		http.Error(w, "Failed to save state", http.StatusInternalServerError)
 		return
 	}
-
-	fmt.Println("Event added for activity:", activity.Name)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"event added"}`))
 }
 
 func handleHook(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodPost {
-		handlePost(w, r, CALENDAR_FILE)
+		handlePost(w, r)
 	}
 	if r.Method == http.MethodGet {
 		handleGet(w, r)
@@ -190,13 +163,13 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing code parameter", http.StatusBadRequest)
 		return
 	}
-	token, err := ExchangeCode(CLIENT_ID, CLIENT_SECRET, code)
+	token, err := ExchangeCode(code)
 	if err != nil {
 		http.Error(w, "Failed to exchange code for token", http.StatusInternalServerError)
 		return
 	}
 
-	err = SaveToken(token)
+	err = saveState(&AppState{Token: token})
 	if err != nil {
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
@@ -205,22 +178,70 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+func escapeICalText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, ";", `\;`)
+	s = strings.ReplaceAll(s, ",", `\,`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
+}
+
 func main() {
 	fmt.Println("Strava To Calendar is starting...")
 	fmt.Println("If you haven't already, authorize the application by visiting:")
 	fmt.Printf("https://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=activity:read_all\n", CLIENT_ID, APP_ADDRESS+"/auth")
 
-	if _, err := os.Stat(CALENDAR_FILE); os.IsNotExist(err) {
-		file, err := os.Create(CALENDAR_FILE)
-		if err != nil {
-			panic(err)
-		}
-		file.WriteString("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//strava-to-calendar//EN\nEND:VCALENDAR\n")
-		file.Close()
-	}
-
-	http.HandleFunc("/hook", handleHook)
 	http.HandleFunc("/auth", handleAuth)
+	http.HandleFunc("/calendar", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"strava.ics\"")
+
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		state, err := loadState()
+		if err != nil || state == nil || state.Token == nil {
+			http.Error(w, "Failed to load state", http.StatusInternalServerError)
+			return
+		}
+
+		icalData := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Strava To Calendar//EN\r\n"
+
+		nowUTC := time.Now().UTC().Format("20060102T150405Z")
+
+		for _, activity := range state.Activities {
+			var descriptionParts []string
+			if activity.AvgSpeed > 0 {
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Vitesse moyenne: %.2f km/h", activity.AvgSpeed*3.6))
+			}
+			if activity.AvgWatts > 0 {
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Puissance moyenne: %.0f W", activity.AvgWatts))
+			}
+			if activity.AvgCadence > 0 {
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Cadence moyenne: %.0f rpm", activity.AvgCadence))
+			}
+			description := escapeICalText(strings.Join(descriptionParts, "\n"))
+
+			summary := escapeICalText(activity.Name)
+
+			icalData += "BEGIN:VEVENT\r\n"
+			icalData += fmt.Sprintf("UID:%d@strava-to-calendar\r\n", activity.Id)
+			icalData += fmt.Sprintf("DTSTAMP:%s\r\n", nowUTC)
+			icalData += fmt.Sprintf("SUMMARY:%s\r\n", summary)
+			icalData += fmt.Sprintf("DTSTART:%s\r\n", activity.StartDate)
+			icalData += fmt.Sprintf("DTEND:%s\r\n", activity.EndDate)
+			icalData += fmt.Sprintf("DESCRIPTION:%s\r\n", description)
+			icalData += "END:VEVENT\r\n"
+		}
+
+		icalData += "END:VCALENDAR\r\n"
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(icalData))
+	})
+	http.HandleFunc("/hook", handleHook)
 	http.HandleFunc("/auth/start", func(w http.ResponseWriter, r *http.Request) {
 		redirectURL := fmt.Sprintf(
 			"https://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s/auth&scope=activity:read_all",
@@ -237,7 +258,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodPost:
-			err := registerWebhook(CLIENT_ID, CLIENT_SECRET, APP_ADDRESS+"/hook", "token")
+			err := registerWebhook(APP_ADDRESS+"/hook", "token")
 			if err != nil {
 				http.Error(w, "Failed to register webhook", http.StatusInternalServerError)
 				return
@@ -245,19 +266,74 @@ func main() {
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"status":"webhook registered"}`))
 		case http.MethodDelete:
-			id := LoadSubscriptionID()
-			if id == nil {
-				http.Error(w, "No subscription ID found", http.StatusBadRequest)
+			state, err := loadState()
+			if err != nil {
+				http.Error(w, "Failed to load state", http.StatusInternalServerError)
 				return
 			}
-			err := unregisterWebhook(CLIENT_ID, CLIENT_SECRET, *id)
+			err = unregisterWebhook(state.SubscriptionId)
 			if err != nil {
 				http.Error(w, "Failed to unregister webhook", http.StatusInternalServerError)
+				return
+			}
+			state.SubscriptionId = 0
+			err = saveState(state)
+			if err != nil {
+				http.Error(w, "Failed to save state", http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"status":"webhook unregistered"}`))
 		}
+	})
+	http.HandleFunc("/fetch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		fmt.Println("Fetching past activities...")
+		state, err := loadState()
+		if err != nil {
+			http.Error(w, "Failed to load state", http.StatusInternalServerError)
+			return
+		}
+
+		if state.Token.IsTokenExpired() {
+			fmt.Println("Access token expired, refreshing...")
+			newToken, err := RefreshToken(state.Token.RefreshToken)
+			if err != nil {
+				http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
+				return
+			}
+			state.Token = newToken
+			err = saveState(state)
+			if err != nil {
+				http.Error(w, "Failed to save refreshed token", http.StatusInternalServerError)
+				return
+			}
+			fmt.Println("Access token refreshed.")
+		}
+
+		activities, err := FetchAthleteActivities(state.Token.AccessToken)
+		if err != nil {
+			http.Error(w, "Failed to fetch activities", http.StatusInternalServerError)
+			return
+		}
+		fmt.Printf("Fetched %d past activities\n", len(activities))
+
+		if len(activities) > 0 {
+			state.Activities = activities
+		}
+
+		err = saveState(state)
+		if err != nil {
+			http.Error(w, "Failed to save state", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"activities fetched"}`))
 	})
 	http.ListenAndServe(":8080", nil)
 
