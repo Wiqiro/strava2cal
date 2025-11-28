@@ -80,3 +80,22 @@ func RefreshToken(refreshToken string) (*StravaToken, error) {
 func (token *StravaToken) IsTokenExpired() bool {
 	return time.Now().Unix() >= token.ExpiresAt-10
 }
+
+func (state *AppState) RefreshTokenIfExpired() error {
+	if !state.Token.IsTokenExpired() {
+		return nil
+	}
+
+	fmt.Println("Access token expired, refreshing...")
+	newToken, err := RefreshToken(state.Token.RefreshToken)
+	if err != nil {
+		return err
+	}
+	state.Token = newToken
+	err = saveState(state)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Access token refreshed.")
+	return nil
+}

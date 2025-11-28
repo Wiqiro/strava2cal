@@ -25,72 +25,6 @@ type WebhookData struct {
 	SubscriptionId int    `json:"subscription_id"`
 }
 
-func registerWebhook(callbackUrl, verifyToken string) error {
-	webhookUrl := "https://www.strava.com/api/v3/push_subscriptions"
-
-	req, err := http.NewRequest("POST", webhookUrl, nil)
-	if err != nil {
-		return err
-	}
-
-	q := req.URL.Query()
-	q.Add("client_id", CLIENT_ID)
-	q.Add("client_secret", CLIENT_SECRET)
-	q.Add("callback_url", callbackUrl)
-	q.Add("verify_token", verifyToken)
-	req.URL.RawQuery = q.Encode()
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	var content struct {
-		Id int `json:"id"`
-	}
-
-	err = json.NewDecoder(resp.Body).Decode(&content)
-	if err != nil {
-		return err
-	}
-
-	err = saveSubscriptionID(content.Id)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("failed to register webhook, status code: %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func unregisterWebhook(subscriptionId int) error {
-	webhookUrl := fmt.Sprintf("https://www.strava.com/api/v3/push_subscriptions/%d", subscriptionId)
-
-	req, err := http.NewRequest("DELETE", webhookUrl, nil)
-	if err != nil {
-		return err
-	}
-
-	q := req.URL.Query()
-	q.Add("client_id", CLIENT_ID)
-	q.Add("client_secret", CLIENT_SECRET)
-	req.URL.RawQuery = q.Encode()
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("failed to unregister webhook, status code: %d", resp.StatusCode)
-	}
-	return nil
-}
-
 func handleGet(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Webhook verification")
 	params := r.URL.Query()
@@ -119,8 +53,14 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to load state", http.StatusInternalServerError)
 		return
 	}
-	token := state.Token
-	activity, err := FetchActivity(token.AccessToken, webhookData.ObjectId)
+
+	err = state.RefreshTokenIfExpired()
+	if err != nil {
+		http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
+		return
+	}
+
+	activity, err := FetchActivity(state.Token.AccessToken, webhookData.ObjectId)
 	if err != nil {
 		fmt.Println("Error fetching activity:", err)
 		http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
@@ -169,7 +109,14 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = saveState(&AppState{Token: token})
+	state, err := loadState()
+	if err != nil {
+		http.Error(w, "Failed to load state", http.StatusInternalServerError)
+		return
+	}
+
+	state.Token = token
+	err = saveState(state)
 	if err != nil {
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
@@ -191,6 +138,9 @@ func main() {
 	fmt.Println("If you haven't already, authorize the application by visiting:")
 	fmt.Printf("https://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=activity:read_all\n", CLIENT_ID, APP_ADDRESS+"/auth")
 
+	http.Handle("/",
+		http.FileServer(http.Dir("../web")),
+	)
 	http.HandleFunc("/auth", handleAuth)
 	http.HandleFunc("/calendar", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
@@ -213,21 +163,24 @@ func main() {
 
 		for _, activity := range state.Activities {
 			var descriptionParts []string
+			descriptionParts = append(descriptionParts, fmt.Sprintf("Duration: %s", (time.Duration(activity.ElapsedTime)*time.Second).String()))
+			descriptionParts = append(descriptionParts, fmt.Sprintf("Distance: %.2fkm | Elevation: %.0fm", activity.Distance/1000, activity.Elevation))
 			if activity.AvgSpeed > 0 {
-				descriptionParts = append(descriptionParts, fmt.Sprintf("Vitesse moyenne: %.2f km/h", activity.AvgSpeed*3.6))
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Average Speed: %.2fkm/h", activity.AvgSpeed*3.6))
 			}
 			if activity.AvgWatts > 0 {
-				descriptionParts = append(descriptionParts, fmt.Sprintf("Puissance moyenne: %.0f W", activity.AvgWatts))
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Average Power: %.0fW", activity.AvgWatts))
 			}
 			if activity.AvgCadence > 0 {
-				descriptionParts = append(descriptionParts, fmt.Sprintf("Cadence moyenne: %.0f rpm", activity.AvgCadence))
+				descriptionParts = append(descriptionParts, fmt.Sprintf("Average Cadence: %.0frpm", activity.AvgCadence))
 			}
+			descriptionParts = append(descriptionParts, fmt.Sprintf("strava.com/activities/%d", activity.Id))
 			description := escapeICalText(strings.Join(descriptionParts, "\n"))
 
-			summary := escapeICalText(activity.Name)
+			summary := escapeICalText(fmt.Sprintf("%s | %s", activity.Type, activity.Name))
 
 			icalData += "BEGIN:VEVENT\r\n"
-			icalData += fmt.Sprintf("UID:%d@strava-to-calendar\r\n", activity.Id)
+			icalData += fmt.Sprintf("UID:%d@strava2cal\r\n", activity.Id)
 			icalData += fmt.Sprintf("DTSTAMP:%s\r\n", nowUTC)
 			icalData += fmt.Sprintf("SUMMARY:%s\r\n", summary)
 			icalData += fmt.Sprintf("DTSTART:%s\r\n", activity.StartDate)
@@ -300,20 +253,10 @@ func main() {
 			return
 		}
 
-		if state.Token.IsTokenExpired() {
-			fmt.Println("Access token expired, refreshing...")
-			newToken, err := RefreshToken(state.Token.RefreshToken)
-			if err != nil {
-				http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
-				return
-			}
-			state.Token = newToken
-			err = saveState(state)
-			if err != nil {
-				http.Error(w, "Failed to save refreshed token", http.StatusInternalServerError)
-				return
-			}
-			fmt.Println("Access token refreshed.")
+		err = state.RefreshTokenIfExpired()
+		if err != nil {
+			http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
+			return
 		}
 
 		activities, err := FetchAthleteActivities(state.Token.AccessToken)
@@ -335,6 +278,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"activities fetched"}`))
 	})
+
 	http.ListenAndServe(":8080", nil)
 
 }

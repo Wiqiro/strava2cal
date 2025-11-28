@@ -65,12 +65,11 @@
     </div>
 
     <div class="card">
-        <h2>Calendar file</h2>
+        <h2>Calendar</h2>
         <p>
-            Download or open your calendar file.<br>
-            Use the opened file URL in your calendar application.
+            Copy the link below to add the calendar to your calendar application.
         </p>
-        <button id="calendar-btn">Open calendar file</button>
+        <pre><code id="calendar-link"></code></pre>
     </div>
 
     <script>
@@ -79,6 +78,7 @@
         const unsubscribeBtn = document.getElementById('unsubscribe-btn');
         const calendarBtn = document.getElementById('calendar-btn');
         const statusDiv = document.getElementById('status');
+        const calendarLinkCode = document.getElementById('calendar-link');
 
         function setStatus(message) {
             const now = new Date().toLocaleTimeString();
@@ -125,9 +125,7 @@
             }
         });
 
-        calendarBtn.addEventListener('click', () => {
-            window.open('/calendar.ics', '_blank');
-        });
+        calendarLinkCode.textContent = `${window.location.origin}/calendar`;
     </script>
 </body>
 
