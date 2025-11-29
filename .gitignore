@@ -1,3 +1,2 @@
-.env
+.env*
 state.json
-/data

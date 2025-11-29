@@ -8,9 +8,9 @@ import (
 )
 
 type StravaToken struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresAt    int64  `json:"expires_at"`
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    int64
 }
 
 func ExchangeCode(code string) (*StravaToken, error) {
@@ -81,21 +81,22 @@ func (token *StravaToken) IsTokenExpired() bool {
 	return time.Now().Unix() >= token.ExpiresAt-10
 }
 
-func (state *AppState) RefreshTokenIfExpired() error {
-	if !state.Token.IsTokenExpired() {
-		return nil
+func RefreshTokenIfExpired() (*StravaToken, error) {
+	token, err := getToken()
+	if err != nil || token == nil {
+		return token, err
 	}
-
+	if !token.IsTokenExpired() {
+		return token, nil
+	}
 	fmt.Println("Access token expired, refreshing...")
-	newToken, err := RefreshToken(state.Token.RefreshToken)
+	newToken, err := RefreshToken(token.RefreshToken)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	state.Token = newToken
-	err = saveState(state)
-	if err != nil {
-		return err
+	if err := saveToken(newToken); err != nil {
+		return nil, err
 	}
 	fmt.Println("Access token refreshed.")
-	return nil
+	return newToken, nil
 }

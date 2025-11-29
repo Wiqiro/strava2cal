@@ -13,7 +13,8 @@ var (
 	CLIENT_ID     = os.Getenv("CLIENT_ID")
 	CLIENT_SECRET = os.Getenv("CLIENT_SECRET")
 	APP_ADDRESS   = os.Getenv("APP_ADDRESS")
-	STATE_FILE    = os.Getenv("STATE_FILE")
+	MONGO_URI     = os.Getenv("MONGO_URI")
+	MONGO_DB      = os.Getenv("MONGO_DB")
 )
 
 type WebhookData struct {
@@ -48,28 +49,21 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := loadState()
-	if err != nil {
-		http.Error(w, "Failed to load state", http.StatusInternalServerError)
+	token, err := RefreshTokenIfExpired()
+	if err != nil || token == nil {
+		http.Error(w, "Failed to load/refresh token", http.StatusInternalServerError)
 		return
 	}
 
-	err = state.RefreshTokenIfExpired()
-	if err != nil {
-		http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
-		return
-	}
-
-	activity, err := FetchActivity(state.Token.AccessToken, webhookData.ObjectId)
+	activity, err := FetchActivity(token.AccessToken, webhookData.ObjectId)
 	if err != nil {
 		fmt.Println("Error fetching activity:", err)
 		http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
 		return
 	}
-	state.Activities = append(state.Activities, *activity)
-	err = saveState(state)
+	err = addActivity(activity)
 	if err != nil {
-		http.Error(w, "Failed to save state", http.StatusInternalServerError)
+		http.Error(w, "Failed to save activity", http.StatusInternalServerError)
 		return
 	}
 
@@ -109,14 +103,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := loadState()
-	if err != nil {
-		http.Error(w, "Failed to load state", http.StatusInternalServerError)
-		return
-	}
-
-	state.Token = token
-	err = saveState(state)
+	err = saveToken(token)
 	if err != nil {
 		http.Error(w, "Failed to save token", http.StatusInternalServerError)
 		return
@@ -138,6 +125,14 @@ func main() {
 	fmt.Println("If you haven't already, authorize the application by visiting:")
 	fmt.Printf("https://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=activity:read_all\n", CLIENT_ID, APP_ADDRESS+"/auth")
 
+	// Initialize MongoDB
+	if err := initMongo(); err != nil {
+		fmt.Println("Failed to init MongoDB:", err)
+	} else {
+		fmt.Println("MongoDB initialized")
+		defer disconnectMongo()
+	}
+
 	http.Handle("/",
 		http.FileServer(http.Dir("../web")),
 	)
@@ -151,9 +146,14 @@ func main() {
 			return
 		}
 
-		state, err := loadState()
-		if err != nil || state == nil || state.Token == nil {
-			http.Error(w, "Failed to load state", http.StatusInternalServerError)
+		token, err := getToken()
+		if err != nil || token == nil {
+			http.Error(w, "Failed to load token", http.StatusInternalServerError)
+			return
+		}
+		activities, err := listActivities()
+		if err != nil {
+			http.Error(w, "Failed to load activities", http.StatusInternalServerError)
 			return
 		}
 
@@ -161,7 +161,7 @@ func main() {
 
 		nowUTC := time.Now().UTC().Format("20060102T150405Z")
 
-		for _, activity := range state.Activities {
+		for _, activity := range activities {
 			var descriptionParts []string
 			descriptionParts = append(descriptionParts, fmt.Sprintf("Duration: %s", (time.Duration(activity.ElapsedTime)*time.Second).String()))
 			descriptionParts = append(descriptionParts, fmt.Sprintf("Distance: %.2fkm | Elevation: %.0fm", activity.Distance/1000, activity.Elevation))
@@ -213,24 +213,24 @@ func main() {
 		case http.MethodPost:
 			err := registerWebhook(APP_ADDRESS+"/hook", "token")
 			if err != nil {
+				fmt.Println(err)
 				http.Error(w, "Failed to register webhook", http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"status":"webhook registered"}`))
 		case http.MethodDelete:
-			state, err := loadState()
+			subId, err := loadSubscriptionId()
 			if err != nil {
-				http.Error(w, "Failed to load state", http.StatusInternalServerError)
+				http.Error(w, "Failed to load subscription id", http.StatusInternalServerError)
 				return
 			}
-			err = unregisterWebhook(state.SubscriptionId)
+			err = unregisterWebhook(subId)
 			if err != nil {
 				http.Error(w, "Failed to unregister webhook", http.StatusInternalServerError)
 				return
 			}
-			state.SubscriptionId = 0
-			err = saveState(state)
+			err = saveSubscriptionID(0)
 			if err != nil {
 				http.Error(w, "Failed to save state", http.StatusInternalServerError)
 				return
@@ -247,33 +247,23 @@ func main() {
 		}
 
 		fmt.Println("Fetching past activities...")
-		state, err := loadState()
-		if err != nil {
-			http.Error(w, "Failed to load state", http.StatusInternalServerError)
-			return
-		}
-
-		err = state.RefreshTokenIfExpired()
+		token, err := RefreshTokenIfExpired()
 		if err != nil {
 			http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
 			return
 		}
 
-		activities, err := FetchAthleteActivities(state.Token.AccessToken)
+		activities, err := FetchAthleteActivities(token.AccessToken)
 		if err != nil {
 			http.Error(w, "Failed to fetch activities", http.StatusInternalServerError)
 			return
 		}
 		fmt.Printf("Fetched %d past activities\n", len(activities))
-
 		if len(activities) > 0 {
-			state.Activities = activities
-		}
-
-		err = saveState(state)
-		if err != nil {
-			http.Error(w, "Failed to save state", http.StatusInternalServerError)
-			return
+			if err := setActivities(activities); err != nil {
+				http.Error(w, "Failed to save activities", http.StatusInternalServerError)
+				return
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"activities fetched"}`))

@@ -9,15 +9,15 @@ import (
 )
 
 type BaseActivity struct {
-	Id          int     `json:"id"`
-	Name        string  `json:"name"`
-	Distance    float32 `json:"distance"`
-	Elevation   float32 `json:"total_elevation_gain"`
-	Timezone    string  `json:"timezone"`
-	AvgSpeed    float32 `json:"average_speed"`
-	AvgWatts    float32 `json:"average_watts"`
-	AvgCadence  float32 `json:"average_cadence"`
-	ElapsedTime int     `json:"elapsed_time"`
+	Id          int
+	Name        string
+	Distance    float32
+	Elevation   float32
+	Timezone    string
+	AvgSpeed    float32
+	AvgWatts    float32
+	AvgCadence  float32
+	ElapsedTime int
 }
 
 type RawActivity struct {

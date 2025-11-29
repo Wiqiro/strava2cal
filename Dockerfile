@@ -13,4 +13,3 @@ VOLUME ["/data"]
 EXPOSE 8080
 
 ENTRYPOINT ["/api/server"]
-
