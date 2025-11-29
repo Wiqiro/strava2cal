@@ -9,15 +9,15 @@ import (
 )
 
 type BaseActivity struct {
-	Id          int
-	Name        string
-	Distance    float32
-	Elevation   float32
-	Timezone    string
-	AvgSpeed    float32
-	AvgWatts    float32
-	AvgCadence  float32
-	ElapsedTime int
+	Id          int     `json:"id" bson:"_id"`
+	Name        string  `json:"name"`
+	Distance    float32 `json:"distance"`
+	Elevation   float32 `json:"total_elevation_gain"`
+	Timezone    string  `json:"timezone"`
+	AvgSpeed    float32 `json:"average_speed"`
+	AvgWatts    float32 `json:"average_watts"`
+	AvgCadence  float32 `json:"average_cadence"`
+	ElapsedTime int     `json:"elapsed_time"`
 }
 
 type RawActivity struct {
@@ -27,10 +27,10 @@ type RawActivity struct {
 }
 
 type Activity struct {
-	BaseActivity
-	Type      string `json:"type"`
-	StartDate string `json:"start_date"`
-	EndDate   string `json:"end_date"`
+	BaseActivity `bson:",inline"`
+	Type         string `json:"type"`
+	StartDate    string `json:"start_date"`
+	EndDate      string `json:"end_date"`
 }
 
 func FetchActivity(accessToken string, activityId int) (*Activity, error) {
@@ -66,7 +66,7 @@ func FetchActivity(accessToken string, activityId int) (*Activity, error) {
 }
 
 func FetchAthleteActivities(accessToken string) ([]Activity, error) {
-	url := "https://www.strava.com/api/v3/athlete/activities"
+	url := "https://www.strava.com/api/v3/athlete/activities?per_page=200"
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

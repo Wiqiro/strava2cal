@@ -61,7 +61,7 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
 		return
 	}
-	err = addActivity(activity)
+	err = upsertActivity(activity)
 	if err != nil {
 		http.Error(w, "Failed to save activity", http.StatusInternalServerError)
 		return
@@ -151,7 +151,7 @@ func main() {
 			http.Error(w, "Failed to load token", http.StatusInternalServerError)
 			return
 		}
-		activities, err := listActivities()
+		activities, err := getActivities()
 		if err != nil {
 			http.Error(w, "Failed to load activities", http.StatusInternalServerError)
 			return
@@ -220,19 +220,15 @@ func main() {
 			w.WriteHeader(http.StatusCreated)
 			w.Write([]byte(`{"status":"webhook registered"}`))
 		case http.MethodDelete:
-			subId, err := loadSubscriptionId()
+			subId, err := getWebhook()
 			if err != nil {
 				http.Error(w, "Failed to load subscription id", http.StatusInternalServerError)
 				return
 			}
+			fmt.Println("Unregistering webhook with id:", subId)
 			err = unregisterWebhook(subId)
 			if err != nil {
 				http.Error(w, "Failed to unregister webhook", http.StatusInternalServerError)
-				return
-			}
-			err = saveSubscriptionID(0)
-			if err != nil {
-				http.Error(w, "Failed to save state", http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusOK)

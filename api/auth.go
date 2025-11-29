@@ -8,9 +8,9 @@ import (
 )
 
 type StravaToken struct {
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    int64
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresAt    int64  `json:"expires_at"`
 }
 
 func ExchangeCode(code string) (*StravaToken, error) {
