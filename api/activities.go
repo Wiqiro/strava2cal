@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -52,7 +53,7 @@ func FetchActivity(accessToken string, activityId int) (*Activity, error) {
 	if resp.StatusCode != http.StatusOK {
 		// fetch body for more details
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		fmt.Println("Response body:", string(bodyBytes))
+		slog.Debug("Failed to fetch activity response", "status_code", resp.StatusCode, "response_body", string(bodyBytes))
 		return nil, fmt.Errorf("failed to fetch activity, status code: %d", resp.StatusCode)
 	}
 

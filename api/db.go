@@ -114,3 +114,12 @@ func getActivities() ([]Activity, error) {
 	}
 	return out, nil
 }
+
+func removeActivity(id int) error {
+	if mongoClient == nil {
+		return nil
+	}
+	coll := mongoClient.Database(MONGO_DB).Collection("activities")
+	_, err := coll.DeleteOne(context.Background(), bson.D{{Key: "_id", Value: id}})
+	return err
+}

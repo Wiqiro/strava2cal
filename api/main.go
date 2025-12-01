@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -17,6 +19,8 @@ var (
 	MONGO_DB      = os.Getenv("MONGO_DB")
 )
 
+const VERIFY_TOKEN = "strava2cal_verify_token"
+
 type WebhookData struct {
 	AspectType     string `json:"aspect_type"`
 	EventTime      int64  `json:"event_time"`
@@ -26,58 +30,96 @@ type WebhookData struct {
 	SubscriptionId int    `json:"subscription_id"`
 }
 
-func handleGet(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Webhook verification")
-	params := r.URL.Query()
-	challenge := params.Get("hub.challenge")
-	if challenge != "" {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"hub.challenge":"%s"}`, challenge)
-		return
+func initLogger() {
+	logLevel := os.Getenv("LOG_LEVEL")
+
+	var level slog.Level
+	switch logLevel {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "INFO":
+		level = slog.LevelInfo
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
 	}
+
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+
+	slog.SetDefault(slog.New(handler))
+
 }
-
-func handlePost(w http.ResponseWriter, r *http.Request) {
-	var webhookData WebhookData
-	err := json.NewDecoder(r.Body).Decode(&webhookData)
-	if err != nil {
-		http.Error(w, "Failed to parse webhook data", http.StatusBadRequest)
-		return
-	}
-
-	if webhookData.ObjectType != "activity" || webhookData.AspectType != "create" {
-		return
-	}
-
-	token, err := RefreshTokenIfExpired()
-	if err != nil || token == nil {
-		http.Error(w, "Failed to load/refresh token", http.StatusInternalServerError)
-		return
-	}
-
-	activity, err := FetchActivity(token.AccessToken, webhookData.ObjectId)
-	if err != nil {
-		fmt.Println("Error fetching activity:", err)
-		http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
-		return
-	}
-	err = upsertActivity(activity)
-	if err != nil {
-		http.Error(w, "Failed to save activity", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"event added"}`))
-}
-
 func handleHook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	slog.Debug("Received webhook request", "body", string(body))
+
 	if r.Method == http.MethodPost {
-		handlePost(w, r)
+		var webhookData WebhookData
+		err := json.Unmarshal(body, &webhookData)
+		if err != nil {
+			http.Error(w, "Failed to parse webhook data", http.StatusBadRequest)
+			return
+		}
+
+		if webhookData.ObjectType != "activity" {
+			return
+		}
+		token, err := RefreshTokenIfExpired()
+
+		if webhookData.AspectType == "delete" {
+			slog.Info("Activity deleted webhook received", "activity_id", webhookData.ObjectId)
+			err := removeActivity(webhookData.ObjectId)
+			if err != nil {
+				slog.Error("Failed to remove activity", "error", err, "activity_id", webhookData.ObjectId)
+			}
+			return
+		}
+		slog.Info("Creating/updating activity webhook received", "activity_id", webhookData.ObjectId)
+
+		if err != nil || token == nil {
+			http.Error(w, "Failed to load/refresh token", http.StatusInternalServerError)
+			return
+		}
+
+		activity, err := FetchActivity(token.AccessToken, webhookData.ObjectId)
+		if err != nil {
+			slog.Error("Failed to fetch activity", "error", err, "activity_id", webhookData.ObjectId)
+			http.Error(w, "Failed to fetch activity", http.StatusInternalServerError)
+			return
+		}
+		err = upsertActivity(activity)
+		if err != nil {
+			http.Error(w, "Failed to save activity", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"event added"}`))
 	}
 	if r.Method == http.MethodGet {
-		handleGet(w, r)
+		slog.Info("Webhook verification request received")
+		params := r.URL.Query()
+		verifyToken := params.Get("hub.verify_token")
+		if verifyToken != VERIFY_TOKEN {
+			http.Error(w, "Invalid verify token", http.StatusForbidden)
+			return
+		}
+		challenge := params.Get("hub.challenge")
+		if challenge != "" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"hub.challenge":"%s"}`, challenge)
+			return
+		}
 	}
 }
 
@@ -121,15 +163,13 @@ func escapeICalText(s string) string {
 }
 
 func main() {
-	fmt.Println("Strava To Calendar is starting...")
-	fmt.Println("If you haven't already, authorize the application by visiting:")
-	fmt.Printf("https://www.strava.com/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=activity:read_all\n", CLIENT_ID, APP_ADDRESS+"/auth")
+	initLogger()
 
-	// Initialize MongoDB
+	slog.Info("Strava To Calendar is starting")
 	if err := initMongo(); err != nil {
-		fmt.Println("Failed to init MongoDB:", err)
+		slog.Error("Failed to initialize MongoDB", "error", err)
 	} else {
-		fmt.Println("MongoDB initialized")
+		slog.Info("MongoDB initialized successfully")
 		defer disconnectMongo()
 	}
 
@@ -211,9 +251,9 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodPost:
-			err := registerWebhook(APP_ADDRESS+"/hook", "token")
+			err := registerWebhook(APP_ADDRESS+"/hook", VERIFY_TOKEN)
 			if err != nil {
-				fmt.Println(err)
+				slog.Error("Failed to register webhook", "error", err)
 				http.Error(w, "Failed to register webhook", http.StatusInternalServerError)
 				return
 			}
@@ -225,7 +265,7 @@ func main() {
 				http.Error(w, "Failed to load subscription id", http.StatusInternalServerError)
 				return
 			}
-			fmt.Println("Unregistering webhook with id:", subId)
+			slog.Info("Unregistering webhook", "subscription_id", subId)
 			err = unregisterWebhook(subId)
 			if err != nil {
 				http.Error(w, "Failed to unregister webhook", http.StatusInternalServerError)
@@ -242,7 +282,7 @@ func main() {
 			return
 		}
 
-		fmt.Println("Fetching past activities...")
+		slog.Info("Starting to fetch past activities")
 		token, err := RefreshTokenIfExpired()
 		if err != nil {
 			http.Error(w, "Failed to refresh token", http.StatusInternalServerError)
@@ -254,7 +294,7 @@ func main() {
 			http.Error(w, "Failed to fetch activities", http.StatusInternalServerError)
 			return
 		}
-		fmt.Printf("Fetched %d past activities\n", len(activities))
+		slog.Info("Successfully fetched past activities", "count", len(activities))
 		if len(activities) > 0 {
 			if err := setActivities(activities); err != nil {
 				http.Error(w, "Failed to save activities", http.StatusInternalServerError)

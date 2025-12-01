@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -89,7 +90,7 @@ func RefreshTokenIfExpired() (*StravaToken, error) {
 	if !token.IsTokenExpired() {
 		return token, nil
 	}
-	fmt.Println("Access token expired, refreshing...")
+	slog.Info("Access token expired, refreshing token")
 	newToken, err := RefreshToken(token.RefreshToken)
 	if err != nil {
 		return nil, err
@@ -97,6 +98,6 @@ func RefreshTokenIfExpired() (*StravaToken, error) {
 	if err := saveToken(newToken); err != nil {
 		return nil, err
 	}
-	fmt.Println("Access token refreshed.")
+	slog.Info("Access token refreshed successfully")
 	return newToken, nil
 }
