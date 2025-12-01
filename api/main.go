@@ -172,10 +172,6 @@ func main() {
 		slog.Info("MongoDB initialized successfully")
 		defer disconnectMongo()
 	}
-
-	http.Handle("/",
-		http.FileServer(http.Dir("../web")),
-	)
 	http.HandleFunc("/auth", handleAuth)
 	http.HandleFunc("/calendar", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/calendar; charset=utf-8")

@@ -1,7 +1,7 @@
 FROM golang:alpine
 
-COPY . /
 WORKDIR /api
+COPY . .
 
 RUN go build -o server .
 EXPOSE 8080
