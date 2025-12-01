@@ -73,6 +73,8 @@
     </div>
 
     <script>
+        const API_URL = "${API_URL}";
+
         const authBtn = document.getElementById('auth-btn');
         const subscribeBtn = document.getElementById('subscribe-btn');
         const unsubscribeBtn = document.getElementById('unsubscribe-btn');
@@ -86,12 +88,12 @@
         }
 
         authBtn.addEventListener('click', () => {
-            window.location.href = "/auth/start";
+            window.location.href = `${API_URL}/auth/start`;
         });
 
         subscribeBtn.addEventListener('click', async () => {
             try {
-                const res = await fetch('/subscriptions', {
+                const res = await fetch(`${API_URL}/subscriptions`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
@@ -109,7 +111,7 @@
 
         unsubscribeBtn.addEventListener('click', async () => {
             try {
-                const res = await fetch('/subscriptions', {
+                const res = await fetch(`${API_URL}/subscriptions`, {
                     method: 'DELETE',
                     headers: { 'Content-Type': 'application/json' }
                 });
@@ -125,7 +127,7 @@
             }
         });
 
-        calendarLinkCode.textContent = `${window.location.origin}/calendar`;
+        calendarLinkCode.textContent = `${API_URL}/calendar`;
     </script>
 </body>
 
